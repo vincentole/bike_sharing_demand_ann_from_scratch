@@ -1,5 +1,7 @@
 # Bike Sharing Demand - ANN From Scratch
 
+This is a regression problem from the Kaggle Challenge "Bike Sharing Demand".
+
 This project is for my personal learning, however, anyone who is also studying machine learning might find this helpful.
 
 I demonstrate how you can build a simple neural network (perceptron) from scratch to model a regression problem.
