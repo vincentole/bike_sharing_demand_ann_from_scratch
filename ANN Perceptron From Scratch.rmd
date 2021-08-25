@@ -1,0 +1,552 @@
+---
+title: "ANN Perceptron From Scratch"
+author: "vincentole"
+output:
+  html_document:
+    toc: yes
+    toc_depth: '3'
+    df_print: paged
+  pdf_document:
+    highlight: breezedark
+    toc: yes
+    toc_depth: 3
+    number_sections: yes
+    df_print: kable
+urlcolor: blue
+---
+
+```{=latex}
+% Adding background color to inline code
+
+\definecolor{codebg}{HTML}{eeeeee}
+\definecolor{codetext}{HTML}{000000}
+\let\textttOrig\texttt
+\renewcommand{\texttt}[1]{\textttOrig{\colorbox{codebg}{\textcolor{codetext}{#1}}}}
+```
+
+# Predicting Bike Sharing Demand with a Neural Network
+## Some Remarks
+
+The data is taken from the Kaggle challenge [Bike Sharing Demand](https://www.kaggle.com/c/bike-sharing-demand).
+
+**Weights initialization**  
+Why is this important to ensure that the weights are small and the input to the sigmoid activation function is close to 0? What happens if the input to the sigmoid is very large in absolute value? 
+
+**Answer:**
+When using sigmoid as an activation function, low initiation weights are important for efficient learning. When weights are set very high, initially, during the first iteration of the feedforward step the product of weights $W_i$ multiplied with $x_i$ will be relatively large. Using a sigmoid function, these values map close to 0 or 1. Since the slope of the sigmoid is very low at these regions, we would have to take many small changes $\Delta W_{ij}^l$ to reach an optimum that is relatively far away from the initial weight. This is because, the updates $\Delta W_{ij}^l$ are functions of the derivative of the activation function $\phi^{\prime}$ (see below). This means that the learning will take a long time, before the optimum is reached. Since the sigmoid is approximately linear around 0, the search for the optimum can be faster, with initial weights that map the inputs to the linear part. 
+
+In addition, the weights should not be too close to 0, either. As we can see from the updating functions:
+$$
+\Delta W_{ij}^1 = \alpha (y - \hat{y}) \phi^{\prime}_2 W_j^2 \phi^{\prime}_{1j}  x_i
+$$
+$$
+\Delta W_{i}^2 = \alpha (y - \hat{y}) \phi^{\prime}_2 h_i 
+$$
+
+
+Close to zero weights will lead to $h_i$ being close to zero. Thus, the $\Delta W_{i}^2$ update will be very small. Similarly, the $\Delta W_{ij}^1$ update will be very small, due to the small $W_j^2$.
+
+In general there are two problems that are called vanishing gradients and exploding gradient. To resolve the issue, some techniques have been developed, called normalized initialization. In addition, different activation functions have been proposed that mitigate these problems.
+
+
+**Weights Updates**
+
+It can happen, that we get very small updates of the weights connecting the input and hidden layers. How this be explained? How could we circumvent the problem?
+
+**Answer:**
+As explained above, the problem is that the derivative of the activation function is close to zero for relatively large absolute input values. We can mitigate this by choosing another input function that is linear, such as the ReLU or leaky ReLU. Note that different activation functions also have disadvantages. Naturally each activation function has its advantages and disadvantages. However, when inspecting the output of the sigmoid prime function, we find `0.2495128` for the `output_layer` and `0.2119817 0.1368153` for the `hidden_layer`. This does not seem to bee very low. For both updates the `error` of `0.0779` seems to have a much greater effect. Additionally, for the `delta_w_i_h` the first `weights_hidden_to_output` of `0.00845272` seem to also contribute greatly to the small updates. Thus, we could also try to find better starting weights, by using more sophisticated normalized initialization. 
+
+## Building the Neural Network
+### 2.1. Load the data.
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+
+# Read train data (train.csv) and save it as a data frame "data"
+data <- read.csv("./train.csv")
+
+# Read test data (test.csv) and save it as a data frame "test"
+test <- read.csv("./test.csv")
+
+# Check that columns are identical
+data <- data[, c(names(test), "count")]
+
+```
+
+```{r}
+# Function to extract the year manually
+year_get <- function(dtetime) {
+  dteday <- strsplit(dtetime, " ")[[1]][1]
+  year <- as.integer(strsplit(dteday, "-")[[1]][1])
+  return(year)
+}
+
+# Extract the year from the datetime columns
+data[,"year"] <- sapply(data[,"datetime"], year_get)
+
+# Extract month, hour, and weekday from the datetime columns
+data$month <- as.integer(format(strptime(data$datetime, format = "%Y-%m-%d %H:%M:%OS"), 
+                                format = "%m"))
+data$hour <- as.integer(format(strptime(data$datetime, format = "%Y-%m-%d %H:%M:%OS"), 
+                               format = "%H"))
+data$weekday <- as.integer(format(strptime(data$datetime, format = "%Y-%m-%d %H:%M:%OS"), 
+                                  format = "%u"))
+# Make sure that "datetime" is of the type "POSIXct" "POSIXt"
+data$datetime <- as.POSIXct(data[,'datetime'], tz=Sys.timezone(), 
+                            format="%Y-%m-%d %H:%M:%S")
+
+# Transform count into log to un-skew distribution
+data$count <- log(data$count)
+```
+
+
+To remind you how the data looks like, here is the plot depicting the number of bike rentals over the first 10 days.
+
+```{r}
+library(ggplot2)
+# Check the data of the first 10 days against time ("datetime")
+
+data$day <- as.integer(format(data[,'datetime'], format = "%d"))
+index <- dim(data[(data$year == 2011 & data$month ==1 & data$day %in% (1:10)),])[1]
+
+count_plot <- ggplot(data[1:index, c("datetime", "count")], 
+                     aes(x = datetime, y = count)) +
+  geom_line() + 
+  xlab("")
+count_plot
+```
+
+### 2.2. Dummy variables
+
+To include categorical variables we convert them into dummy variables.
+
+```{r, warning = FALSE}
+library(dummies)
+# Define categorical columns
+categorical <- c("season", "weather", "year", "month", "hour", "weekday")
+
+# Create dummies
+data_dummies <- dummy.data.frame(data, categorical)
+
+# Remove first columns of each dummy to avoid multicollinearity
+data_dummies <- data_dummies %>%
+  select(-season1, -weather1, -year2011, -month1, -hour0, -weekday1)
+
+# We also remove the columns workingday and atemp
+data_dummies <- data_dummies %>%
+  select(-workingday, -atemp)
+
+```
+
+**One-Hot Encoding**
+
+In machine learning literature, transformation of categorical variables into a set of dummies is called a "one-hot encoding". Why do we apply this transformation?
+
+**Answer:**
+Since the regression function cannot evaluate categories the way we would like it to, we encode each category of the variables separately. Here we code a `1` for an observation where the category is present/active and a `0` when it is absent. This acts like a switch and the regression function can evaluate this category properly. In statistics this is generally known as dummy variable encoding.
+
+### 2.3. Data normalization
+
+It is a widespread best practice to normalize the continuous variables before feeding them into a neural network. This means that for each continuous feature, you subtract the mean of the feature and divide by the standard deviation, so that the feature is centered around 0 and has a unit standard deviation.  
+Since a standardization of count resulted in poor performance, we only standardize the independent quantitative variables.
+
+```{r}
+# We save the mean and standard deviation of the dependent variable,
+# so that we can transform the variable after analysis back to its original unit
+mean_cnt = mean(data_dummies$count)
+sd_cnt = sd(data$count)
+
+# We normalize "count", "temp", "humidity", and "windspeed" variables
+
+#quantitative <- c("count", "temp", "humidity", "windspeed")
+quantitative <- c("temp", "humidity", "windspeed")
+
+# Set new variable
+data_scaled <- data_dummies
+
+# Standardize data
+data_scaled[quantitative] <- lapply(data_scaled[quantitative], 
+                                    function(x) c(scale(x))) 
+
+# Check that the transformation was successfull
+cat('The means of the quantitative columns are:\n')
+sapply(data_scaled[quantitative], mean)
+cat('\nThe standard deviations of the quantitative columns are:\n')
+sapply(data_scaled[quantitative], sd)
+```
+
+**Normalizing the data**
+
+Why is data normalization important for neural networks?
+
+**Answer:**
+First, it has been found that with standardization the model finds a better fit, given a relatively small size of the sample and network, but slows down the training process (Shanker,Hu,Hung, 1996). In addition the choice of the standardization method is important and depends on the problem and data at hand (Anysz, Zbiciak, Ibadov, 2016). In another study the authors analyzed normalization and found that, given their data, the fit as well as the computation time were improved (Sola, Sevilla, 1997). From these few studies we conclude, that standardization helps to make the model more efficient and reduce the prediction error for small samples, but may increase or decrease computation time.
+  
+References:  
+(Shanker,Hu,Hung, 1996),  
+https://doi.org/10.1016/0305-0483(96)00010-2  
+  
+(Anysz Zbiciak Ibadov, 2016),  
+https://doi.org/10.1016/j.proeng.2016.08.081  
+  
+(Sola, Sevilla, 1997)  
+https://doi.org/10.1109/23.589532  
+  
+### 2.4. Training, validation, and test sets.
+
+Next, we need to split our data into training, validation, and test sets. 
+We use the first 50% of the **consecutive** data points as the train set, the next 30% as the validation set and the rest as the test set. We use consecutive data points only because we deal with the time series data. The idea is to train the model on the historical data, and predict on the future data. We will later shuffle the training observations, though.
+
+```{r}
+# We split "data" into data_train (70%), data_val (15%), and data_test (15%).
+n = dim(data_scaled)[1]
+i_train = round(n * 0.7)
+i_val =  round(n * 0.85)
+
+data_train = data_scaled[1:i_train,]
+data_val = data_scaled[(i_train+1):i_val,]
+data_test = data_scaled[(i_val+1):n,]
+
+# Separate each of the data sets into features and targets ("count").
+# We exclude "day" and "datetime" from the features.
+# We will need these columns to visualize the results.
+features = data_train %>% select(-count, -day, -datetime)
+val_features = data_val %>% select(-count, -day, -datetime)
+test_features = data_test %>% select(-count, -day, -datetime)
+  
+targets = data_train %>% select(count)
+val_targets = data_val %>% select(count)
+test_targets = data_test %>% select(count)
+
+```
+
+```{r}
+plot.ts(data_train$count)
+
+```
+
+
+### 2.5. Training the neural network  
+
+#### 2.5.1 Building the model  \
+\
+The neural network we are going to use to predict the daily number of bike rentals ("count") has two layers, a hidden layer and an output layer. We use the sigmoid activation function for the hidden layer. The output layer includes only one unit, and it does **not** use any activation function (because this is a regression problem).
+
+To train the network, we will use the approach that is very close to the mini-batch training, but a little easier to program. For each training iteration (not epoch), we will grab a random sample of the data (say, 128 observations) and update the weights after we went through all these 128 data points. This means that you will need to use quite a few iterations. 
+
+The hyperparameters to choose are:
+
+1) The number of iterations
+2) The learning rate
+3) The number of hidden units
+
+```{r}
+neural_net <- function(iterations = 1000, learnrate = 0.01, 
+                       n_hidden = 3, progress = T){
+  # Set the hyperparameters 
+  
+  # Number of hidden units
+  n_hidden = n_hidden
+  # Number of training iterations
+  iterations = iterations
+  # Learning rate
+  learnrate = learnrate
+  
+  # Added batch size as parameter
+  batch_size = 128
+  
+  # Set the number of observations
+  n_records = dim(features)[1]
+  # Set the number of features
+  n_features = dim(features)[2]
+  
+  # Create empty vectors for training and validation losses.
+  # Track training and validation losses for each iteration.
+  train_losses = c() 
+  val_losses = c()
+  
+  sigmoid <- function(x){1 / (1+exp(-x))}
+  sigmoid_prime = function(x) {x * (1 - x)}
+  
+  last_loss = "None"
+  
+  # Initialize weights from a normal distribution with mean 0 and 
+  # sd=1/(sqrt(n_features)).
+  weights_input_hidden = matrix(rnorm(n_features*n_hidden, 
+                                      mean = 0, 
+                                      sd = 1/(sqrt(n_features))), 
+                                nrow = n_features)
+  weights_hidden_output = matrix(rnorm(n_hidden, 
+                                       mean = 0, 
+                                       sd = 1/(sqrt(n_features))), 
+                                 nrow = n_hidden)
+  
+  # For each iteration
+  for(it in c(1:iterations)){
+    # Initialize the cumulative gradient matrices with zeros
+    cum_grad_input_hidden = matrix(rep(0,n_features*n_hidden), nrow = n_features)
+    cum_grad_hidden_output = matrix(rep(0,n_hidden), nrow = n_hidden)
+  
+    # Randomly choose 128 indices corresponding to training observations
+    batch_index = sample(1:n_records, batch_size)
+    # Change the number of observations to the number of observations 
+    # in a random sample/mini-batch (here, 128)
+    n_records = length(batch_index)
+    
+    # For each observation in the random sample from the training data
+    for(i in batch_index){
+      
+      x = as.numeric(features[i, ])
+      # Make x a row matrix
+      x = t(as.matrix(x))
+      y = as.matrix(targets)[i]
+      
+      ## Forward pass ##
+      # Make a forward pass through the network
+      hidden_layer = sigmoid(x %*% weights_input_hidden)
+      output_layer = hidden_layer %*% weights_hidden_output
+      
+      ## Backward pass ##
+      # Calculate the network's prediction error
+      error = as.numeric(y - output_layer)
+      
+      # Calculate the gradient of the loss function with respect 
+      # to the weights from hidden layer to output layer
+      grad_hidden_output = learnrate * error * t(hidden_layer)
+      
+      # Update the gradient of the loss function with respect 
+      # to the weights from hidden layer to output layer cumulated over 128 observations
+      cum_grad_hidden_output = cum_grad_hidden_output + grad_hidden_output
+      
+      # Calculate the gradient of the loss function with respect 
+      # to the weights from input layer to hidden layer
+      grad_input_hidden = learnrate * error * 
+        (t(x) %*% (t(weights_hidden_output) * sigmoid_prime(hidden_layer)))
+      
+      # Update the gradient of the loss function with respect 
+      # to the weights from input layer to hidden layer cumulated over 128 observations   
+      cum_grad_input_hidden = cum_grad_input_hidden + grad_input_hidden  
+    }
+    
+    # Update the weights one time after you went through 128 random 
+    # training examples.
+    weights_input_hidden = weights_input_hidden + (cum_grad_input_hidden/batch_size)
+    weights_hidden_output = weights_hidden_output + (cum_grad_hidden_output/batch_size)
+    
+    # Calculate MSE for the whole training set to track the progress 
+    # (training loss)
+    hidden_layer_train = sigmoid(as.matrix(features) %*% weights_input_hidden)
+    output_layer_train = hidden_layer_train %*% weights_hidden_output
+    loss_train = mean((as.matrix(targets) - output_layer_train)^2)
+    
+    # Calculate MSE for the whole validation set to decide on the hyperparameters
+    # (validation loss)
+    hidden_layer_val = sigmoid(as.matrix(val_features) %*% weights_input_hidden)
+    output_layer_val = hidden_layer_val %*% weights_hidden_output
+    loss_val = mean((as.matrix(val_targets) - output_layer_val)^2)
+    
+    # Save the training and validation losses for the current iteration
+    # in train_losses and val_losses.
+    train_losses <- c(train_losses, loss_train)
+    val_losses <- c(val_losses, loss_val)
+    
+    # Progress and error log for tracking computation
+    if(progress == T){
+      if((it) %% (iterations / 20) == 0){
+        # Progress log
+        cat("Iteration:", it, round(100*it/iterations), "%\n")
+        
+        # Error log
+        if(last_loss!= "None" & last_loss < loss_train){
+          print(paste("Train loss: ", loss_train, "  WARNING - Loss Increasing"))
+          print(paste("Valid loss: ", loss_val))
+        }
+        else{
+          print(paste("Train loss: ", loss_train))
+          print(paste("Valid loss: ", loss_val))
+        }
+        last_loss = loss_train
+      }
+    }  
+  }
+  # Return weights and losses
+  return(list(final_wih = weights_input_hidden, final_who = weights_hidden_output,
+              train_losses = train_losses, val_losses = val_losses))
+}
+```
+
+#### 2.5.2 Hyperparameter Tuning \
+\
+**Comment:** To find good hyperparameters we perform a simple grid search. Since this is computationally burdensome, we first stick with 1000 iterations and find an optimal alpha for these iterations. Here we only apply 3 different numbers of neuron. We then search for an optimum amount of hidden layer neurons. Finally, we fix the amount of neurons and increase the iterations to 5000. We search for an optimum alpha level for these parameters and then re-estimate the model with optimal iterations, based on minimum validation error.
+
+```{r}
+# Simple grid search function
+grid_search = function(grid_alpha, grid_hidden){
+  # Initiate output 
+  grid_loss <- data.frame(matrix(0, ncol = 3, 
+                                 nrow = length(grid_alpha)*length(grid_hidden)))
+  colnames(grid_loss) <- c("learnrate", "n_hidden", "val_loss")
+  # Initiate iterations
+  i <- 1
+  # Grid search loop
+  for (alpha in grid_alpha){
+    for(h in grid_hidden){
+      # Progress log
+      cat(i, ":", nrow(grid_loss), round(100*i/nrow(grid_loss)), "% ", 
+          "Fitting alpha: ", alpha, " hidden: ", h, "\n" )
+      # Perform model fit and save output
+      nnet <- neural_net(iterations = 1000, learnrate = alpha, 
+                         n_hidden = h, progress = F)
+      grid_loss$learnrate[i] <- alpha
+      grid_loss$n_hidden[i] <- h
+      grid_loss$val_loss[i] <- tail(nnet$val_losses,1)
+      i = i+1
+    }
+  }
+  return(grid_loss)
+}
+
+```
+
+```{r}
+# First grid search
+
+grid_alpha <- c(0.005, 0.01, 0.05, 0.1, 0.2)
+grid_hidden <- c(10, 20)
+
+# Perform grid search
+grid_loss = grid_search(grid_alpha = grid_alpha, grid_hidden = grid_hidden)
+
+# Inspect the parameters from the grid search
+grid_loss
+grid_loss[which.min(grid_loss$val_loss),]
+```
+
+**Comment:** The learning rate 0.05 was generally the best during the grid search.  
+Note, the random starting weights have a big influence and although the output during the "report run" might not be exactly equivalent to the previous runs. Nevertheless, 0.05 was observed to be the best value generally.  
+
+We now try to find a good hidden neuron size.  
+
+```{r}
+# Second grid search
+grid_alpha <- c(0.05)
+
+# Grid_hidden <- c(10, 15, 20, 25, 30) # first round
+grid_hidden <- c(10, 13, 16, 20, 23, 26, 29) # second round, 15 is best after 3 runs
+
+# Perform grid search
+grid_loss = grid_search(grid_alpha = grid_alpha, grid_hidden = grid_hidden)
+
+# Inspect the parameters from the grid search
+grid_loss
+grid_loss[which.min(grid_loss$val_loss),]
+```
+
+**Comment:** The hidden neuron size of around 15 seems to be a good fit.  
+Note, the random starting weights have a big influence, so that the optimal amount of hidden neurons was between 13 and 20 depending on the run.  
+
+Nevertheless, 15 neurons was observed to be the best parameter, generally.  
+
+Finally, we try to alter the learning rate and iterations to find the optimal hyperparameters.
+
+```{r}
+# Iteration tuning
+# Fit with 15 hidden neurons and different alphas, to find optimal alpha 
+nnet <- neural_net(iterations = 1500, learnrate = 0.03, n_hidden = 15, progress = T)
+
+```
+**Comment:** The best parameters found are: 1500 iterations, a learning rate of 0.05, and 15 hidden neurons.
+We now plot the results.
+
+```{r}
+# We use ggplot2 library to plot training and validation MSE losses against
+# the iteration number.
+cat("Optimal iteration:", which.min(nnet$val_loss), 
+    "with val_error:", nnet$val_losses[which.min(nnet$val_loss)])
+
+ggplot(data.frame(), aes(x = 1:length(nnet$val_losses))) +
+  geom_line(aes(y = nnet$train_losses, color = "train MSE")) +
+  geom_line(aes(y = nnet$val_losses, color = "val MSE")) +
+  labs(title = "Train and Validation MSE", x = "iterations", y = "MSE")
+
+```
+
+**The choice of hyperparameters**
+
+How did we choose the number of iterations, the learning rate, and the number of hidden nodes.
+
+**Answer:**
+To find optimal hyperparameters, first, a simple two step grid search for alpha and the hidden layer size was performed. In the first step, the search was performed over a relatively large range of values. In the second step, the search further narrowed the range of values down.  
+Finally, with runs having a large number of iterations, the optimal alpha and number of iterations was determined. 
+
+
+### 2.6. Model performance
+
+To understand how the model is doing on the unseen data, we will calculate the test MSE and visualize the predictions.
+
+```{r}
+# Calculate the test MSE loss on the test part ("data_test") of the data
+sigmoid <- function(x){1 / (1+exp(-x))}
+
+hidden_layer_test = sigmoid(as.matrix(test_features) %*% nnet$final_wih)
+output_layer_test = hidden_layer_test %*% nnet$final_who
+loss_test = mean((as.matrix(test_targets) - output_layer_test)^2)
+loss_test
+```
+
+```{r}
+# De-normalize predictions to visualize them in the original units.
+#predictions_test = exp(output_layer_test * sd_cnt + mean_cnt)
+#count_test <- exp(data_test$count * sd_cnt + mean_cnt)
+predictions_test = exp(output_layer_test)
+count_test <- exp(data_test$count)
+
+# Add the predicted values for "count" to the "data_test" as a new column "prediction".
+
+# Changed the variable to store results, to avoid inflating count 
+# by running the chunk multiple times.
+test_results <- as_tibble(list(datetime = data_test$datetime,
+                               count = (count_test), 
+                               prediction = as.numeric(predictions_test)))
+
+# Use ggplot2 to plot predictions and true values of "count" for 
+# the first 7 days in the test set ("data_test") against time ("datetime").
+
+library(lubridate)
+
+# Format plot data
+plot_data <-  test_results %>%
+  filter(datetime < (datetime[1] + days(10))) %>%
+  pivot_longer(cols = c(prediction, count), 
+               names_to = "count_label", 
+               values_to = "count_values")
+
+
+# Plot data
+ggplot(plot_data, aes(x = datetime, y = count_values, color = count_label)) +
+  geom_line() +
+  scale_color_manual(values=c("black", "brown1")) +
+  labs(title = "Actual vs Predicted Values", y = "Count", x = "", color = "Legend")
+
+```
+
+As we can see from the graph, the neural network was able to model bike demand, however, with some flaws.  
+  
+The next steps would be to further tune hyperparameters and try other variable transformations. Also, further diagnostic plots might be helpful in determining where the model improvement is most effective.
+\
+\
+This might be more easily implemented with existing ANN libraries such as PyTorch or TensorFlow.  
+\
+\
+\
+\
+\
+
+
+
+
+
+
+
+
