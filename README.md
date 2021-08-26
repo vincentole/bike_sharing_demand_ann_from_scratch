@@ -4,7 +4,7 @@ This is a regression problem from the Kaggle Challenge "Bike Sharing Demand".
 
 This project is for my personal learning, however, anyone who is also studying machine learning might find this helpful.
 
-I demonstrate how you can build a simple neural network from scratch to model a regression problem.
+I demonstrate how you can build a simple neural network (perceptron) from scratch to model a regression problem.
 
 You can find an html version of the code via the following link: \
 [Bike Sharing Demand - ANN From Scratch](https://vincentole.github.io/bike_sharing_demand_ann_from_scratch/)
